@@ -130,23 +130,38 @@ impl App {
             non_indexed_action_for_key(&self.state, &raw_key, BindingDispatch::Prefix)
         {
             self.execute_prefix_key_action(action);
-            return;
-        }
-
-        if let Some(binding) = command_for_key(&self.state, &raw_key, BindingDispatch::Prefix) {
+        } else if let Some(binding) =
+            command_for_key(&self.state, &raw_key, BindingDispatch::Prefix)
+        {
             self.cancel_copy_mode_if_active();
             self.launch_custom_command(binding, ActionContext::Prefix);
-            return;
-        }
-
-        if let Some(action) =
+        } else if let Some(action) =
             indexed_navigation_action(&self.state, &raw_key, BindingDispatch::Prefix)
         {
             self.execute_prefix_key_action(action);
-            return;
         }
 
-        // Unmatched key: stay in the command layer, ignore the key.
+        // Actions run through the `*_via_api` layer, which resets `mode` to
+        // Terminal to drop you into the resulting pane. Re-assert the command
+        // layer so it stays open — unless the action opened a sub-UI (dialog,
+        // picker, copy/resize), which suspends the layer and returns to it on
+        // close via the `command_layer` guard in the leave/modal helpers.
+        if self.state.command_layer && !mode_suspends_command_layer(self.state.mode) {
+            self.state.mode = Mode::FocusNav;
+        }
+    }
+
+    /// Event-loop invariant: while the command layer is active, any operation that
+    /// dropped `mode` back to the terminal or navigator — including deferred
+    /// tab/pane creations that focus their result on a later frame — snaps back to
+    /// `Mode::FocusNav`. Suspending sub-UIs (dialogs, pickers, copy/resize) keep
+    /// control and are restored via the `command_layer` guard when they close.
+    pub(crate) fn enforce_command_layer(&mut self) {
+        if self.state.command_layer
+            && matches!(self.state.mode, Mode::Terminal | Mode::Navigate)
+        {
+            self.state.mode = Mode::FocusNav;
+        }
     }
 
     fn execute_prefix_key_action(&mut self, action: NavigateAction) {
@@ -1981,6 +1996,33 @@ fn move_active_tab_relative(state: &mut AppState, delta: isize) {
     if let Some(insert) = tab_move_insert_index(ws.tabs.len(), source, delta) {
         ws.move_tab(source, insert);
     }
+}
+
+/// Modes that keep control when reached from the command layer (a text dialog,
+/// picker, or another persistent mode). While one of these is active the command
+/// layer stays suspended and is restored when it closes; any other mode is treated
+/// as an implicit drop back to the terminal and is snapped back to `Mode::FocusNav`.
+fn mode_suspends_command_layer(mode: Mode) -> bool {
+    matches!(
+        mode,
+        Mode::RenameWorkspace
+            | Mode::RenameTab
+            | Mode::RenamePane
+            | Mode::NewLinkedWorktree
+            | Mode::OpenExistingWorktree
+            | Mode::ConfirmRemoveWorktree
+            | Mode::ConfirmClose
+            | Mode::Settings
+            | Mode::KeybindHelp
+            | Mode::Navigator
+            | Mode::ContextMenu
+            | Mode::GlobalMenu
+            | Mode::Copy
+            | Mode::Resize
+            | Mode::Onboarding
+            | Mode::ReleaseNotes
+            | Mode::ProductAnnouncement
+    )
 }
 
 fn leave_navigate_mode(state: &mut AppState) {
