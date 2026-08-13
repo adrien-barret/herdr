@@ -103,6 +103,49 @@ impl App {
         leave_command_mode(&mut self.state);
     }
 
+    pub(crate) fn handle_focus_nav_key(&mut self, raw_key: TerminalKey) {
+        let key = raw_key.as_key_event();
+        self.state.update_dismissed = true;
+
+        if matches!(key.code, KeyCode::Modifier(_)) {
+            return;
+        }
+
+        if key.code == KeyCode::Esc
+            || self.state.keybinds.focus_nav.matches_prefix_key(&raw_key)
+            || self.state.keybinds.focus_nav.matches_direct_key(&raw_key)
+        {
+            self.state.command_layer = false;
+            leave_command_mode(&mut self.state);
+            return;
+        }
+
+        if let Some(action) =
+            non_indexed_action_for_key(&self.state, &raw_key, BindingDispatch::Prefix)
+        {
+            self.execute_prefix_key_action(action);
+        } else if let Some(binding) =
+            command_for_key(&self.state, &raw_key, BindingDispatch::Prefix)
+        {
+            self.cancel_copy_mode_if_active();
+            self.launch_custom_command(binding, ActionContext::Prefix);
+        } else if let Some(action) =
+            indexed_navigation_action(&self.state, &raw_key, BindingDispatch::Prefix)
+        {
+            self.execute_prefix_key_action(action);
+        }
+
+        if self.state.command_layer && !mode_suspends_command_layer(self.state.mode) {
+            self.state.mode = Mode::FocusNav;
+        }
+    }
+
+    pub(crate) fn enforce_command_layer(&mut self) {
+        if self.state.command_layer && self.state.mode == Mode::Terminal {
+            self.state.mode = Mode::FocusNav;
+        }
+    }
+
     fn execute_prefix_key_action(&mut self, action: NavigateAction) {
         if action == NavigateAction::EditScrollback {
             let previous_mode = self.state.mode;
@@ -395,6 +438,10 @@ impl App {
                 leave_navigate_mode(&mut self.state);
             }
             NavigateAction::EnterResizeMode => self.state.mode = Mode::Resize,
+            NavigateAction::EnterFocusNav => {
+                self.state.command_layer = true;
+                self.state.mode = Mode::FocusNav;
+            }
             NavigateAction::ResizePaneLeft => {
                 self.resize_pane_direction_via_api(NavDirection::Left);
                 leave_navigate_mode(&mut self.state);
@@ -750,7 +797,7 @@ impl App {
         Some((ws_idx, focused.id, target))
     }
 
-    fn relative_visible_workspace(&self, delta: isize) -> Option<usize> {
+    pub(super) fn relative_visible_workspace(&self, delta: isize) -> Option<usize> {
         let order = self.state.visible_workspace_order();
         if order.is_empty() {
             return None;
@@ -769,7 +816,7 @@ impl App {
         Some((ws_idx, source, insert))
     }
 
-    fn relative_tab(&self, delta: isize) -> Option<usize> {
+    pub(super) fn relative_tab(&self, delta: isize) -> Option<usize> {
         let ws = self
             .state
             .active
@@ -1416,6 +1463,7 @@ pub(crate) enum NavigateAction {
     CopyMode,
     Zoom,
     EnterResizeMode,
+    EnterFocusNav,
     ResizePaneLeft,
     ResizePaneDown,
     ResizePaneUp,
@@ -1566,6 +1614,7 @@ fn non_indexed_action_for_key(
         (&kb.close_pane, NavigateAction::ClosePane),
         (&kb.zoom, NavigateAction::Zoom),
         (&kb.resize_mode, NavigateAction::EnterResizeMode),
+        (&kb.focus_nav, NavigateAction::EnterFocusNav),
         (&kb.resize_pane_left, NavigateAction::ResizePaneLeft),
         (&kb.resize_pane_down, NavigateAction::ResizePaneDown),
         (&kb.resize_pane_up, NavigateAction::ResizePaneUp),
@@ -1809,6 +1858,10 @@ pub(super) fn execute_navigate_action_in_context(
             leave_navigate_mode(state);
         }
         NavigateAction::EnterResizeMode => state.mode = Mode::Resize,
+        NavigateAction::EnterFocusNav => {
+            state.command_layer = true;
+            state.mode = Mode::FocusNav;
+        }
         NavigateAction::ResizePaneLeft => {
             state.resize_pane(NavDirection::Left);
             leave_navigate_mode(state);
@@ -1927,7 +1980,15 @@ fn move_active_tab_relative(state: &mut AppState, delta: isize) {
     }
 }
 
+fn mode_suspends_command_layer(mode: Mode) -> bool {
+    !matches!(mode, Mode::Terminal | Mode::FocusNav)
+}
+
 fn leave_navigate_mode(state: &mut AppState) {
+    if state.command_layer {
+        state.mode = Mode::FocusNav;
+        return;
+    }
     if state.active.is_some() {
         state.mode = Mode::Terminal;
     }
@@ -1954,6 +2015,10 @@ fn finish_custom_command_context(
 }
 
 fn leave_command_mode(state: &mut AppState) {
+    if state.command_layer {
+        state.mode = Mode::FocusNav;
+        return;
+    }
     if state.copy_mode_pane_is_focused() {
         state.mode = Mode::Copy;
     } else if state.active.is_some() {
