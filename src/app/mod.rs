@@ -539,6 +539,7 @@ impl App {
             previous_pane_focus: None,
             selected,
             mode,
+            command_layer: false,
             should_quit: false,
             detach_exits: no_session,
             detach_requested: false,

@@ -103,6 +103,52 @@ impl App {
         leave_command_mode(&mut self.state);
     }
 
+    /// Persistent command layer (vim-like normal mode). The whole prefix keymap is
+    /// live on bare keys and the mode stays open across actions. Escape or
+    /// re-pressing the trigger exits back to the terminal. Actions that open a text
+    /// dialog (rename, new tab/workspace name, ...) suspend the layer and return to
+    /// it on commit/cancel, since `command_layer` stays set and the shared
+    /// leave/modal helpers route back to `Mode::FocusNav`.
+    pub(crate) fn handle_focus_nav_key(&mut self, raw_key: TerminalKey) {
+        let key = raw_key.as_key_event();
+        self.state.update_dismissed = true;
+
+        if matches!(key.code, KeyCode::Modifier(_)) {
+            return;
+        }
+
+        if key.code == KeyCode::Esc
+            || self.state.keybinds.focus_nav.matches_prefix_key(&raw_key)
+            || self.state.keybinds.focus_nav.matches_direct_key(&raw_key)
+        {
+            self.state.command_layer = false;
+            leave_command_mode(&mut self.state);
+            return;
+        }
+
+        if let Some(action) =
+            non_indexed_action_for_key(&self.state, &raw_key, BindingDispatch::Prefix)
+        {
+            self.execute_prefix_key_action(action);
+            return;
+        }
+
+        if let Some(binding) = command_for_key(&self.state, &raw_key, BindingDispatch::Prefix) {
+            self.cancel_copy_mode_if_active();
+            self.launch_custom_command(binding, ActionContext::Prefix);
+            return;
+        }
+
+        if let Some(action) =
+            indexed_navigation_action(&self.state, &raw_key, BindingDispatch::Prefix)
+        {
+            self.execute_prefix_key_action(action);
+            return;
+        }
+
+        // Unmatched key: stay in the command layer, ignore the key.
+    }
+
     fn execute_prefix_key_action(&mut self, action: NavigateAction) {
         if action == NavigateAction::EditScrollback {
             let previous_mode = self.state.mode;
@@ -395,7 +441,10 @@ impl App {
                 leave_navigate_mode(&mut self.state);
             }
             NavigateAction::EnterResizeMode => self.state.mode = Mode::Resize,
-            NavigateAction::EnterFocusNav => self.state.mode = Mode::FocusNav,
+            NavigateAction::EnterFocusNav => {
+                self.state.command_layer = true;
+                self.state.mode = Mode::FocusNav;
+            }
             NavigateAction::ResizePaneLeft => {
                 self.resize_pane_direction_via_api(NavDirection::Left);
                 leave_navigate_mode(&mut self.state);
@@ -1812,7 +1861,10 @@ pub(super) fn execute_navigate_action_in_context(
             leave_navigate_mode(state);
         }
         NavigateAction::EnterResizeMode => state.mode = Mode::Resize,
-        NavigateAction::EnterFocusNav => state.mode = Mode::FocusNav,
+        NavigateAction::EnterFocusNav => {
+            state.command_layer = true;
+            state.mode = Mode::FocusNav;
+        }
         NavigateAction::ResizePaneLeft => {
             state.resize_pane(NavDirection::Left);
             leave_navigate_mode(state);
@@ -1932,6 +1984,10 @@ fn move_active_tab_relative(state: &mut AppState, delta: isize) {
 }
 
 fn leave_navigate_mode(state: &mut AppState) {
+    if state.command_layer {
+        state.mode = Mode::FocusNav;
+        return;
+    }
     if state.active.is_some() {
         state.mode = Mode::Terminal;
     }
@@ -1958,6 +2014,10 @@ fn finish_custom_command_context(
 }
 
 fn leave_command_mode(state: &mut AppState) {
+    if state.command_layer {
+        state.mode = Mode::FocusNav;
+        return;
+    }
     if state.copy_mode_pane_is_focused() {
         state.mode = Mode::Copy;
     } else if state.active.is_some() {

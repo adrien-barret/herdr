@@ -295,16 +295,12 @@ pub(super) fn render_focus_nav_overlay(app: &AppState, frame: &mut Frame, area: 
         .add_modifier(Modifier::BOLD);
 
     let line = Line::from(vec![
-        Span::styled(" NAV ", mode_style),
+        Span::styled(" CMD ", mode_style),
         Span::raw("  "),
-        Span::styled("hjkl", key),
-        Span::styled(" pane  ", dim),
-        Span::styled("⇥", key),
-        Span::styled(" tab  ", dim),
-        Span::styled("[ ]", key),
-        Span::styled(" ws  ", dim),
+        Span::styled("herdr keys active (no prefix)", dim),
+        Span::raw("  "),
         Span::styled("esc", key),
-        Span::styled(" done", dim),
+        Span::styled(" exit", dim),
     ]);
 
     let overlay_y = area.y + area.height.saturating_sub(1);
