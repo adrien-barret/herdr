@@ -55,7 +55,7 @@ pub(crate) use self::scrollbar::{
 use self::settings::render_settings_overlay;
 #[cfg(test)]
 pub(crate) use self::sidebar::workspace_drop_indicator_row;
-use self::sidebar::{render_sidebar, render_sidebar_collapsed};
+use self::sidebar::{render_sidebar, render_sidebar_collapsed, render_workspace_bar};
 use self::status::{
     copy_feedback_rect, render_config_diagnostic, render_copy_feedback, render_toast_notification,
     toast_notification_rect,
@@ -235,8 +235,18 @@ fn compute_view_internal(
             .clamp(app.sidebar_min_width, app.sidebar_max_width)
     };
 
+    let workspaces_at_bottom =
+        app.workspaces_position == crate::config::WorkspacesPositionConfig::Bottom;
+    let (content_area, workspace_bar_rect) = if workspaces_at_bottom && area.height > 1 {
+        let [content_area, ws_bar_rect] =
+            Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
+        (content_area, ws_bar_rect)
+    } else {
+        (area, Rect::default())
+    };
+
     let [sidebar_area, main_area] =
-        Layout::horizontal([Constraint::Length(sidebar_w), Constraint::Min(1)]).areas(area);
+        Layout::horizontal([Constraint::Length(sidebar_w), Constraint::Min(1)]).areas(content_area);
 
     let (tab_bar_rect, terminal_area) = app
         .active
@@ -246,7 +256,11 @@ fn compute_view_internal(
 
     if !app.sidebar_collapsed {
         app.workspace_scroll = normalized_workspace_scroll(app, sidebar_area, app.workspace_scroll);
-        let (_, detail_area) = expanded_sidebar_sections(sidebar_area, app.sidebar_section_split);
+        let detail_area = if workspaces_at_bottom {
+            sidebar_area
+        } else {
+            expanded_sidebar_sections(sidebar_area, app.sidebar_section_split).1
+        };
         let max_agent_scroll = agent_panel_scroll_metrics(app, detail_area).max_offset_from_bottom;
         app.agent_panel_scroll = app.agent_panel_scroll.min(max_agent_scroll);
     } else {
@@ -256,7 +270,7 @@ fn compute_view_internal(
         app.agent_panel_scroll = 0;
     }
 
-    let workspace_card_areas = if app.sidebar_collapsed {
+    let workspace_card_areas = if app.sidebar_collapsed || workspaces_at_bottom {
         Vec::new()
     } else {
         compute_workspace_card_areas(app, sidebar_area)
@@ -309,6 +323,7 @@ fn compute_view_internal(
         layout: ViewLayout::Desktop,
         sidebar_rect: sidebar_area,
         workspace_card_areas,
+        workspace_bar_rect,
         tab_bar_rect,
         tab_hit_areas: tab_bar_view.tab_hit_areas,
         tab_scroll_left_hit_area: tab_bar_view.scroll_left_hit_area,
@@ -372,6 +387,7 @@ fn compute_mobile_view(
         layout: ViewLayout::Mobile,
         sidebar_rect: Rect::default(),
         workspace_card_areas: Vec::new(),
+        workspace_bar_rect: Rect::default(),
         tab_bar_rect: Rect::default(),
         tab_hit_areas: Vec::new(),
         tab_scroll_left_hit_area: Rect::default(),
@@ -403,6 +419,9 @@ pub fn render_with_runtime_registry(
     let terminal_area = app.view.terminal_area;
 
     render_navigation_chrome(app, terminal_runtimes, frame);
+    if app.view.layout == ViewLayout::Desktop && app.view.workspace_bar_rect.height > 0 {
+        render_workspace_bar(app, terminal_runtimes, frame, app.view.workspace_bar_rect);
+    }
     if app.view.layout != ViewLayout::Mobile {
         render_tab_bar(app, frame, tab_bar_area);
     }
@@ -898,6 +917,49 @@ mod tests {
             app.view.terminal_area.y + app.view.terminal_area.height - 1,
         );
         assert!(mode_row.contains("PREFIX"), "{mode_row}");
+    }
+
+    #[test]
+    fn workspaces_position_bottom_moves_list_to_bottom_bar() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+
+        // Default is Left: no bottom bar, workspace list rendered in the sidebar.
+        assert_eq!(
+            app.workspaces_position,
+            crate::config::WorkspacesPositionConfig::Left
+        );
+        compute_view(&mut app, Rect::new(0, 0, 80, 20));
+        assert_eq!(app.view.workspace_bar_rect, Rect::default());
+        assert_eq!(app.view.sidebar_rect, Rect::new(0, 0, 26, 20));
+        assert!(!app.view.workspace_card_areas.is_empty());
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let header_row = buffer_row_text(terminal.backend().buffer(), app.view.sidebar_rect, 0);
+        assert!(header_row.contains("spaces"), "{header_row}");
+
+        // Bottom: 1-row bar carved off the bottom, sidebar keeps full height with no list.
+        app.workspaces_position = crate::config::WorkspacesPositionConfig::Bottom;
+        compute_view(&mut app, Rect::new(0, 0, 80, 20));
+        assert_eq!(app.view.workspace_bar_rect, Rect::new(0, 19, 80, 1));
+        assert_eq!(app.view.sidebar_rect, Rect::new(0, 0, 26, 19));
+        assert!(app.view.workspace_card_areas.is_empty());
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let sidebar_header =
+            buffer_row_text(terminal.backend().buffer(), app.view.sidebar_rect, 0);
+        assert!(!sidebar_header.contains("spaces"), "{sidebar_header}");
+        let bar_row = buffer_row_text(
+            terminal.backend().buffer(),
+            app.view.workspace_bar_rect,
+            app.view.workspace_bar_rect.y,
+        );
+        assert!(bar_row.contains("one"), "{bar_row}");
     }
 
     #[tokio::test]

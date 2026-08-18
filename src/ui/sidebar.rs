@@ -12,6 +12,7 @@ use self::tokens::{ResolvedToken, ResolvedTokenKind, SpaceTokenContext};
 use super::scrollbar::{render_scrollbar, should_show_scrollbar};
 use super::status::{state_icon, state_label, state_label_color};
 use super::text::{display_width, display_width_u16, truncate_end};
+use super::widgets::panel_contrast_fg;
 use crate::app::state::{AgentPanelSort, Palette};
 use crate::app::{AppState, Mode};
 use crate::detect::AgentState;
@@ -993,11 +994,58 @@ pub(super) fn render_sidebar(
         buf[(sep_x, y)].set_style(sep_style);
     }
 
-    let (ws_area, detail_area) = expanded_sidebar_sections(area, app.sidebar_section_split);
-
-    render_workspace_list(app, terminal_runtimes, frame, ws_area, is_navigating);
-    render_agent_detail(app, terminal_runtimes, frame, detail_area);
+    if app.workspaces_position == crate::config::WorkspacesPositionConfig::Bottom {
+        // Workspaces live in a bottom bar; give the agent detail the full sidebar height.
+        let detail_area = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
+        render_agent_detail(app, terminal_runtimes, frame, detail_area);
+    } else {
+        let (ws_area, detail_area) = expanded_sidebar_sections(area, app.sidebar_section_split);
+        render_workspace_list(app, terminal_runtimes, frame, ws_area, is_navigating);
+        render_agent_detail(app, terminal_runtimes, frame, detail_area);
+    }
     render_sidebar_toggle(app, frame, area, false, p);
+}
+
+/// Render the desktop workspaces bar (single row, left-to-right) at the bottom of the screen.
+/// Active workspace is highlighted with the accent color. Overflow is clipped, like the tab bar.
+pub(super) fn render_workspace_bar(
+    app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let p = &app.palette;
+    frame.render_widget(
+        Paragraph::new(" ".repeat(area.width as usize)).style(Style::default().bg(p.panel_bg)),
+        area,
+    );
+
+    let mut x = area.x;
+    let right = area.x + area.width;
+    for (i, ws) in app.workspaces.iter().enumerate() {
+        if x >= right {
+            break;
+        }
+        let is_active = app.active == Some(i);
+        let label = format!(" {} ", ws.display_name_from(&app.terminals, terminal_runtimes));
+        let style = if is_active {
+            Style::default()
+                .fg(panel_contrast_fg(p))
+                .bg(p.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(p.overlay1).bg(p.surface0)
+        };
+        let width = (display_width_u16(&label)).min(right.saturating_sub(x)).max(1);
+        frame.render_widget(
+            Paragraph::new(label).style(style),
+            Rect::new(x, area.y, width, 1),
+        );
+        x = x.saturating_add(width + 1);
+    }
 }
 
 fn resolved_token_spans(
